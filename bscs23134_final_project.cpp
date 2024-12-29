@@ -594,9 +594,7 @@ class searchEngineTries{
         }
 
     public:
-        searchEngineTries() {
-            this->indexFiles();
-        }
+        searchEngineTries() { this->indexFiles(); }
 
         void engine() {
             while(true){
@@ -646,7 +644,7 @@ void wholeProject() {
             wholeProject();
         }
         searchEngineTries searchEngine;
-        //searchEngine.engine();
+        searchEngine.engine();
     } else if (choice == "exit") {
         std::cout << "Exiting the program\n";
     } else {
@@ -655,7 +653,4 @@ void wholeProject() {
     }
 }
 
-int main() {
-    wholeProject();
-    return 0;
-}
+int main() { wholeProject(); return 0; }
