@@ -315,29 +315,51 @@ class searchEngineUnordered {
 
 struct trieNode {
     std::unordered_map<char, trieNode*> children;
-    std::vector<std::string> documents;
     std::vector<wordInDocument> occurrences;
-    trieNode() = default;
-    ~trieNode() {
-        for (auto& [ch, child] : children) delete child;
-    }
+    bool isEndOfWord;
+
+    trieNode() : isEndOfWord(false) {}
 };
 
+class trie{
+    private:
+        trieNode* root;
+
+        void clear(trieNode* node) {
+            if (!node) return;
+            for (auto& child : node->children) clear(child.second);
+            delete node;
+        }
+
+    public:
+        trie() { root = new trieNode(); }
+
+        void insert(const std::string& word, const std::string& docName, const std::string& docContent, int pos) {
+            wordInDocument wordDoc(docName, docContent, pos);
+            trieNode* current = root;
+            for (const auto& letter : word) {
+                if (current->children.find(letter) == current->children.end()) current->children[letter] = new trieNode();
+                current = current->children[letter];
+            }
+            current->occurrences.push_back(wordDoc);
+            current->isEndOfWord = true;
+        }
+
+        std::vector<wordInDocument> search(const std::string& word) {
+            trieNode* current = root;
+            for (const auto& letter : word) {
+                if (current->children.find(letter) == current->children.end()) return {};
+                current = current->children[letter];
+            }
+            return current->isEndOfWord ? current->occurrences : std::vector<wordInDocument>();
+        }
+
+        ~trie() { this->clear(root); }
+};
 
 class searchEngineTries{
     private:
-        trieNode* root;
-        
-        void insert(const std::string& word, const std::string& document, int pos) {
-            trieNode* curr = root;
-            for (char ch : word) {
-                if (curr->children.find(ch) == curr->children.end()) curr->children[ch] = new trieNode();
-                curr = curr->children[ch];
-            }
-            if (curr->documents.empty() || curr->documents.back() != document) curr->documents.push_back(document);
-            if (curr->occurrences.empty() || curr->occurrences.back().getDocumentName() != document) curr->occurrences.push_back(wordInDocument(document, pos));
-            else curr->occurrences.back().addPosition(pos);
-        }
+        trie trieObj;
 
         void indexFiles() {
             std::vector<std::string> files;
@@ -352,17 +374,244 @@ class searchEngineTries{
                     std::string word;
                     while (iss >> word) {
                         std::transform(word.begin(), word.end(), word.begin(), ::tolower);
-                        insert(word, file, pos);
+                        trieObj.insert(word, file, content, pos);
                         pos++;
                     }
                 }
             }
         }
 
+        void queryType(const std::string& query, searchType& type) {
+            type = invalidSearch;
+            std::string tempQuery = query;
+            std::transform(tempQuery.begin(), tempQuery.end(), tempQuery.begin(), ::tolower);
+            if (tempQuery.find(addSign) != std::string::npos) type = addSearch;
+            else if (tempQuery.find(sentenceSign) != std::string::npos) {
+                if (tempQuery.find(subSign) != std::string::npos) type = sentenceSubSearch;
+                else type = sentenceSearch;
+            }
+            else if (tempQuery.find(subSign) != std::string::npos) type = subSearch;
+            else type = defaultSearch;
+        }
+
+        std::vector<std::pair<std::string, int>> searchDefault(const std::string& query) {
+            std::istringstream iss(query);
+            std::string word;
+            std::unordered_map<std::string, int> documentScores; 
+            std::unordered_map<std::string, std::unordered_set<std::string>> documentWordMap;
+            std::unordered_map<std::string, int> wordCount;
+            std::vector<std::string> words;
+            while (iss >> word) {
+                std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+                words.push_back(word);
+                wordCount[word]++;
+            }
+            for (const auto& queryWord : words) {
+                std::vector<wordInDocument> occurrences = trieObj.search(queryWord);
+                for (const auto& doc : occurrences) {
+                    documentScores[doc.getDocumentName()] += doc.getFrequency();
+                    documentWordMap[doc.getDocumentName()].insert(queryWord);
+                }
+            }
+            std::vector<std::pair<std::string, int>> results;
+            for (const auto& [docName, score] : documentScores) results.push_back({docName, score});
+            std::sort(results.begin(), results.end(), [&](const auto& a, const auto& b) {
+                size_t wordsA = documentWordMap[a.first].size();
+                size_t wordsB = documentWordMap[b.first].size();
+                if (wordsA != wordsB) return wordsA > wordsB;
+                return a.second > b.second;
+            });
+            return results;
+        }
+
+        std::vector<std::pair<std::string, int>> searchAdd(const std::string& query) {
+            std::vector<std::pair<std::string, int>> results;
+            std::istringstream iss(query);
+            std::string word;
+            std::vector<std::string> words;
+            while (std::getline(iss, word, addSign)) {
+                std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+                words.push_back(word);
+            }
+            std::unordered_map<std::string, std::vector<int>> documentOccurrences;
+            for (const auto& word : words) {
+                std::vector<wordInDocument> occurrences = trieObj.search(word);
+                for (const auto& doc : occurrences) {
+                    const std::string& docName = doc.getDocumentName();
+                    if (documentOccurrences.find(docName) == documentOccurrences.end()) documentOccurrences[docName] = std::vector<int>(words.size(), 0);
+                    auto it = std::find(words.begin(), words.end(), word);
+                    int wordIndex = std::distance(words.begin(), it);
+                    documentOccurrences[docName][wordIndex] = doc.getFrequency();
+                }
+            }
+            for (const auto& [docName, freqs] : documentOccurrences) {
+                bool containsAllWords = true;
+                int minOccurrences = INT_MAX;
+                for (const auto& word : words) {
+                    std::vector<wordInDocument> occurrences = trieObj.search(word);
+                    bool wordFoundInDoc = false;
+                    int wordFrequency = 0;
+                    for (const auto& doc : occurrences) {
+                        if (doc.getDocumentName() == docName) {
+                            wordFoundInDoc = true;
+                            wordFrequency = doc.getFrequency();
+                            break;
+                        }
+                    }
+                    if (!wordFoundInDoc) { containsAllWords = false; break; }
+                    minOccurrences = std::min(minOccurrences, wordFrequency);
+                }
+                if (containsAllWords) results.push_back({docName, minOccurrences});
+            }
+            std::sort(results.begin(), results.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) { return a.second > b.second; });
+            return results;
+        }
+
+        std::vector<std::pair<std::string, int>> searchSub(const std::string& query) {
+            std::vector<std::pair<std::string, int>> results;
+            std::istringstream iss(query);
+            std::string word;
+            std::vector<std::string> words;
+            while (std::getline(iss, word, subSign)) {
+                std::transform(word.begin(), word.end(), word.begin(), ::tolower);  // Convert to lowercase
+                words.push_back(word);
+            }
+            std::string word1 = words[0]; 
+            std::vector<std::string> excludeWords(words.begin() + 1, words.end());
+            std::vector<wordInDocument> occurrences = trieObj.search(word1);
+            for (const auto& doc : occurrences) {
+                const std::string& docName = doc.getDocumentName();
+                bool containsAnyExcludeWord = false;
+                for (const auto& excludeWord : excludeWords) {
+                    std::vector<wordInDocument> excludeOccurrences = trieObj.search(excludeWord);
+                    bool excludeWordFound = false;
+                    for (const auto& doc2 : excludeOccurrences) if (doc2.getDocumentName() == docName) { excludeWordFound = true; break; }
+                    if (excludeWordFound) { containsAnyExcludeWord = true; break; }
+                }
+                if (!containsAnyExcludeWord) results.push_back({docName, doc.getFrequency()});
+            }
+            std::sort(results.begin(), results.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) { return a.second > b.second; });
+            return results;
+        }
+
+        std::vector<std::pair<std::string, int>> searchSentence(const std::string& query) {
+            std::vector<std::pair<std::string, int>> results;
+            std::string sentence = query.substr(1, query.size() - 2);
+            std::istringstream iss(sentence);
+            std::string word;
+            std::vector<std::string> words;
+            while (iss >> word) {
+                std::transform(word.begin(), word.end(), word.begin(), ::tolower);
+                words.push_back(word);
+            }
+            std::unordered_map<std::string, std::vector<int>> documentOccurrences;
+            for (const auto& word : words) {
+                std::vector<wordInDocument> occurrences = trieObj.search(word);
+                for (const auto& doc : occurrences) {
+                    const std::string& docName = doc.getDocumentName();
+                    if (documentOccurrences.find(docName) == documentOccurrences.end()) documentOccurrences[docName] = std::vector<int>(words.size(), 0);
+                    auto it = std::find(words.begin(), words.end(), word);
+                    int wordIndex = std::distance(words.begin(), it);
+                    documentOccurrences[docName][wordIndex] = doc.getFrequency();
+                }
+            }
+            for (const auto& [docName, freqs] : documentOccurrences) {
+                bool containsAllWords = true;
+                int minOccurrences = INT_MAX;
+                for (const auto& word : words) {
+                    std::vector<wordInDocument> occurrences = trieObj.search(word);
+                    bool wordFoundInDoc = false;
+                    int wordFrequency = 0;
+                    for (const auto& doc : occurrences) {
+                        if (doc.getDocumentName() == docName) {
+                            wordFoundInDoc = true;
+                            wordFrequency = doc.getFrequency();
+                            break;
+                        }
+                    }
+                    if (!wordFoundInDoc) { containsAllWords = false; break; }
+                    minOccurrences = std::min(minOccurrences, wordFrequency);
+                }
+                if (containsAllWords) results.push_back({docName, minOccurrences});
+            }
+            std::sort(results.begin(), results.end(), [](const std::pair<std::string, int>& a, const std::pair<std::string, int>& b) { return a.second > b.second; });
+            return results;
+        }
+
+        std::vector<std::pair<std::string, int>> searchSentenceSub(const std::string& query) {
+            std::vector<std::pair<std::string, int>> finalResults, results;
+            std::istringstream queryStream(query);
+            std::string sentence;
+            std::queue<std::string> sentences;
+            while (std::getline(queryStream, sentence, '-')) {
+                sentence.erase(0, sentence.find_first_not_of(" \t"));
+                sentence.erase(sentence.find_last_not_of(" \t") + 1);
+                sentences.push(sentence);
+            }
+            bool haveToCheckFirst = true;
+            while(!sentences.empty()){
+                if (haveToCheckFirst){
+                    haveToCheckFirst = false;
+                    std::string firstSentence = sentences.front();
+                    sentences.pop();
+                    finalResults = searchSentence(firstSentence);
+                    results = finalResults;
+                } else {
+                    std::string sentence = sentences.front();
+                    sentences.pop();
+                    std::vector<std::pair<std::string, int>> resultsFromOtherSentence = searchSentence(sentence);
+                    for (const auto& result : results){
+                        if (std::find(resultsFromOtherSentence.begin(), resultsFromOtherSentence.end(), result) == resultsFromOtherSentence.end()){
+                            results.erase(std::remove(results.begin(), results.end(), result), results.end());
+                        }
+                    }
+                }
+            }
+            for (const auto& result : results) {
+                if (std::find(finalResults.begin(), finalResults.end(), result) != finalResults.end()) 
+                    finalResults.erase(std::remove(finalResults.begin(), finalResults.end(), result), finalResults.end()); 
+            }
+            return finalResults;
+        }
+        
+        void search(const std::string& query) {
+            searchType type;
+            queryType(query, type);
+            std::string types[] = {"defaultSearch", "addSearch", "subSearch", "sentenceSearch","sentenceSubSearch", "invalidSearch"};
+            std::cout << "Type: " << types[type] << std::endl;
+            std::vector<std::pair<std::string, int>> results;
+            switch (type) {
+                case defaultSearch: results = searchDefault(query); break;
+                case addSearch: results = searchAdd(query); break;
+                case subSearch: results = searchSub(query); break;
+                case sentenceSearch: results = searchSentence(query); break;
+                case sentenceSubSearch: results = searchSentenceSub(query); break;
+                case invalidSearch: { std::cout << "Invalid search query\n"; return; } break;
+            }
+        
+            if (results.empty()) std::cout << "No results found\n";
+            else for (const auto& result : results) { std::cout << result.first << "   " << result.second << std::endl; }
+        }
+
     public:
+        searchEngineTries() {
+            this->indexFiles();
+        }
+
+        void engine() {
+            while(true){
+                std::string query;
+                std::cout << "Enter query: ";
+                std::getline(std::cin, query);
+                if (query == "exit") break;
+                this->search(query);
+            }
+        }
+
+        ~searchEngineTries() = default;
 };
 
-void welcomeScreen() {
+void wholeProject() {
     std::cout << "Welcome to the Search Engine\n";
     std::cout << "---------------------------------------------------" << std::endl;
     std::cout << "Enter 1 for Unordered Map Search Engine\n";
@@ -380,7 +629,7 @@ void welcomeScreen() {
         else if (choice == "review" || choice == "Review") mainDir = mainDir1;
         else {
             std::cout << "Invalid choice\n";
-            welcomeScreen();
+            wholeProject();
         }
         searchEngineUnordered searchEngine;
         searchEngine.engine();
@@ -394,7 +643,7 @@ void welcomeScreen() {
         else if (choice == "review" || choice == "Review") mainDir = mainDir1;
         else {
             std::cout << "Invalid choice\n";
-            welcomeScreen();
+            wholeProject();
         }
         searchEngineTries searchEngine;
         //searchEngine.engine();
@@ -402,11 +651,11 @@ void welcomeScreen() {
         std::cout << "Exiting the program\n";
     } else {
         std::cout << "Invalid choice\n";
-        welcomeScreen();
+        wholeProject();
     }
 }
 
 int main() {
-    welcomeScreen();
+    wholeProject();
     return 0;
 }
